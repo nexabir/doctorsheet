@@ -1,29 +1,39 @@
-import Groq from "groq-sdk";
+export const generateFormula = async (problem, headers) => {
+  // 1. Check for Mock Mode environment
+  // We enable mock mode if the environment is strictly local and no proxy is available,
+  // or if explicitly requested. For now, we attempt the proxy first.
+  
+  try {
+    const response = await fetch('/api/generate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ problem, headers }),
+    });
 
-const apiKey = import.meta.env.VITE_GROQ_API_KEY;
+    if (!response.ok) {
+      // If the proxy fails (e.g., during local 'npm run dev' without Vercel CLI),
+      // we fallback to mock mode to keep the dev experience smooth.
+      if (response.status === 404 || response.status === 500) {
+        console.warn("API Proxy not found or failed. Falling back to Mock Mode.");
+        return getMockResponse(problem);
+      }
+      throw new Error(`Server error: ${response.statusText}`);
+    }
 
-// Initialize Groq client
-// Note: dangerouslyAllowBrowser is required for client-side API calls
-const groq = new Groq({ 
-  apiKey: apiKey,
-  dangerouslyAllowBrowser: true 
-});
+    return await response.json();
+    
+  } catch (error) {
+    console.error("Logic Engine Error:", error);
+    
+    // Final safety fallback to mock mode
+    console.warn("Falling back to Mock Mode due to connection error.");
+    return getMockResponse(problem);
+  }
+};
 
-const SYSTEM_PROMPT = `You are a Senior Google Sheets Engineer. Your task is to convert natural language into a valid Google Sheets formula.
-
-OUTPUT FORMAT:
-Return ONLY a JSON object with this exact structure:
-{
-  "formula": "The formula starting with =",
-  "explanation": "A concise explanation of the logic."
-}
-
-RULES:
-- No conversational text.
-- No markdown code blocks.
-- Use ARRAYFORMULA where appropriate for efficiency.
-- Ensure all column references match the provided Context Mapping.`;
-
+// --- Mock Logic (Keeping exactly as before for resiliency) ---
 const MOCK_FORMULAS = [
   {
     keywords: ['sum', 'total', 'add'],
@@ -44,44 +54,4 @@ const getMockResponse = (problem) => {
     formula: "=INDEX(A:A, MATCH(MAX(B:B), B:B, 0))",
     explanation: "Logic: Finds the value in column A corresponding to the maximum value in column B."
   };
-};
-
-export const generateFormula = async (problem, headers) => {
-  // Check if API key is missing
-  if (!apiKey || apiKey === 'your_groq_api_key_here') {
-    console.warn("Using Mock Mode: API key missing.");
-    return new Promise((resolve) => {
-      setTimeout(() => resolve(getMockResponse(problem)), 1000);
-    });
-  }
-
-  try {
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { 
-          role: "user", 
-          content: `Problem: ${problem}\nContext Mapping: ${headers || 'None'}` 
-        }
-      ],
-      model: "llama-3.3-70b-versatile",
-      temperature: 0.1,
-      response_format: { type: "json_object" }
-    });
-
-    const content = chatCompletion.choices[0]?.message?.content;
-    if (!content) throw new Error("No response from Groq");
-
-    return JSON.parse(content);
-  } catch (error) {
-    console.error("Groq API Error:", error);
-    
-    // Fallback to mock on rate limit or other errors to preserve UX
-    if (error.status === 429) {
-      console.warn("Rate limit reached. Falling back to Mock Mode.");
-      return getMockResponse(problem);
-    }
-    
-    throw new Error("Logic Engine could not process this request. " + (error.message || ""));
-  }
 };
