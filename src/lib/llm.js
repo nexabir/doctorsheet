@@ -1,57 +1,87 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from "groq-sdk";
 
-const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-const genAI = new GoogleGenerativeAI(apiKey);
+const apiKey = import.meta.env.VITE_GROQ_API_KEY;
 
-const SYSTEM_PROMPT = `You are an expert Google Sheets formula architect. Your only goal is to translate the user's natural language request into a valid, highly optimized Google Sheets formula.
+// Initialize Groq client
+// Note: dangerouslyAllowBrowser is required for client-side API calls
+const groq = new Groq({ 
+  apiKey: apiKey,
+  dangerouslyAllowBrowser: true 
+});
 
-CONTEXT PROVIDED:
-The user will provide a 'Problem Description' and an optional 'Column Mapping' (e.g., A=Date, B=Sales).
+const SYSTEM_PROMPT = `You are a Senior Google Sheets Engineer. Your task is to convert natural language into a valid Google Sheets formula.
 
-YOUR OUTPUT REQUIREMENTS:
-1. You MUST output ONLY valid JSON in the exact format below.
-2. You MUST NOT include conversational text, markdown formatting blocks (like \`\`\`json), or explanations outside of the JSON structure.
-3. The formula MUST start with the '=' sign and use correct Google Sheets functions (e.g., ARRAYFORMULA, QUERY, SUMIFS, VLOOKUP).
-
-JSON SCHEMA:
+OUTPUT FORMAT:
+Return ONLY a JSON object with this exact structure:
 {
-  "formula": "The exact Google Sheets formula starting with = ",
-  "explanation": "A short, 1-2 sentence simple explanation of how the formula works."
-}`;
+  "formula": "The formula starting with =",
+  "explanation": "A concise explanation of the logic."
+}
+
+RULES:
+- No conversational text.
+- No markdown code blocks.
+- Use ARRAYFORMULA where appropriate for efficiency.
+- Ensure all column references match the provided Context Mapping.`;
+
+const MOCK_FORMULAS = [
+  {
+    keywords: ['sum', 'total', 'add'],
+    formula: "=SUMIFS(C:C, A:A, \">\"&E1, B:B, \"Sales\")",
+    explanation: "Calculates the total sum in column C where dates in A are after E1 and category in B is 'Sales'."
+  },
+  {
+    keywords: ['find', 'lookup', 'search'],
+    formula: "=VLOOKUP(E2, A:C, 3, FALSE)",
+    explanation: "Searches for the value in E2 within range A:C and returns the corresponding value from the 3rd column."
+  }
+];
+
+const getMockResponse = (problem) => {
+  const lowerProblem = problem.toLowerCase();
+  const match = MOCK_FORMULAS.find(f => f.keywords.some(k => lowerProblem.includes(k)));
+  return match || {
+    formula: "=INDEX(A:A, MATCH(MAX(B:B), B:B, 0))",
+    explanation: "Logic: Finds the value in column A corresponding to the maximum value in column B."
+  };
+};
 
 export const generateFormula = async (problem, headers) => {
+  // Check if API key is missing
+  if (!apiKey || apiKey === 'your_groq_api_key_here') {
+    console.warn("Using Mock Mode: API key missing.");
+    return new Promise((resolve) => {
+      setTimeout(() => resolve(getMockResponse(problem)), 1000);
+    });
+  }
+
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash", systemInstruction: SYSTEM_PROMPT });
-    
-    const prompt = `Problem: ${problem}\nColumn Mapping: ${headers || 'None provided'}`;
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
-    
-    // Parse the JSON. Sometimes Gemini might still return markdown blocks despite instructions.
-    let cleanText = responseText.trim();
-    if (cleanText.startsWith('\`\`\`json')) {
-      cleanText = cleanText.substring(7);
-    }
-    if (cleanText.startsWith('\`\`\`')) {
-      cleanText = cleanText.substring(3);
-    }
-    if (cleanText.endsWith('\`\`\`')) {
-      cleanText = cleanText.substring(0, cleanText.length - 3);
-    }
-    
-    return JSON.parse(cleanText.trim());
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { 
+          role: "user", 
+          content: `Problem: ${problem}\nContext Mapping: ${headers || 'None'}` 
+        }
+      ],
+      model: "llama-3.3-70b-versatile",
+      temperature: 0.1,
+      response_format: { type: "json_object" }
+    });
+
+    const content = chatCompletion.choices[0]?.message?.content;
+    if (!content) throw new Error("No response from Groq");
+
+    return JSON.parse(content);
   } catch (error) {
-    console.error("Gemini API Error:", error);
+    console.error("Groq API Error:", error);
     
-    let errorMessage = "Failed to generate formula.";
-    if (error.message?.includes("API_KEY_INVALID")) {
-      errorMessage = "Invalid Gemini API Key. Please check your .env file.";
-    } else if (error.message?.includes("403") || error.message?.includes("PERMISSION_DENIED")) {
-      errorMessage = "API Key permission denied. Ensure 'Generative Language API' is enabled in your Google Cloud Console.";
-    } else if (error.message?.includes("model not found")) {
-      errorMessage = "Model not found. Try switching to 'gemini-1.5-flash'.";
+    // Fallback to mock on rate limit or other errors to preserve UX
+    if (error.status === 429) {
+      console.warn("Rate limit reached. Falling back to Mock Mode.");
+      return getMockResponse(problem);
     }
     
-    throw new Error(errorMessage + " (Details: " + (error.message || "Unknown error") + ")");
+    throw new Error("Logic Engine could not process this request. " + (error.message || ""));
   }
 };
